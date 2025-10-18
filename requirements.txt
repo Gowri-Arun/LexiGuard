@@ -1,0 +1,8 @@
+streamlit>=1.28
+transformers>=4.38
+torch>=2.2; platform_system != 'Darwin' or platform_machine != 'arm64'
+deep-translator>=1.11
+indic-transliteration>=2.3
+opencv-python-headless>=4.8
+pillow>=10.0
+requests>=2.31
