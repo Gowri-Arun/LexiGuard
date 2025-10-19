@@ -1,0 +1,19 @@
+# Core runtime
+streamlit==1.38.0
+requests==2.32.3
+
+# NLP (emotion detection via Hugging Face transformers; CPU only)
+transformers==4.44.2
+# PyTorch is required by transformers pipeline for inference (CPU ok)
+torch==2.4.1
+
+# Optional: gesture recognition (used if available)
+opencv-python-headless==4.10.0.84
+mediapipe==0.10.14
+
+# Transliteration (Devanagari ↔ Latin)
+indic-transliteration==2.3.60
+
+# Imaging / array utils
+Pillow==10.4.0
+numpy==1.26.4
