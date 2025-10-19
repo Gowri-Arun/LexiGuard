@@ -118,6 +118,8 @@ class GestureResult:
     detected: bool
     label: t.Optional[str] = None
     error: t.Optional[str] = None
+    # Optional confidence score in [0.0, 1.0]
+    confidence: t.Optional[float] = None
 
 
 # -----------------------------
@@ -285,13 +287,24 @@ def analyze_emotion(text: str) -> EmotionResult:
 # -----------------------------
 
 def detect_smile_from_image(pil_image: Image.Image) -> GestureResult:
-    """Basic smile detection using OpenCV Haar cascades (very simple and demo-only)."""
+    """Basic smile detection using OpenCV Haar cascades with light pre-processing and confidence.
+
+    Steps:
+    - Convert to grayscale
+    - Apply CLAHE (adaptive histogram equalization) for contrast
+    - Detect face → detect smile in face ROI
+    - Confidence based on number/size of smile detections
+    """
     if cv2 is None:
         return GestureResult(detected=False, error="OpenCV not available")
 
     try:
         img = np.array(pil_image.convert("RGB"))
         gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+
+        # CLAHE for robustness under varying lighting
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        gray = clahe.apply(gray)
 
         # Use built-in Haar cascades shipped with OpenCV package
         face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
@@ -300,28 +313,45 @@ def detect_smile_from_image(pil_image: Image.Image) -> GestureResult:
             return GestureResult(detected=False, error="Haar cascades not found")
 
         faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
+        best_conf = 0.0
         for (x, y, w, h) in faces:
             roi_gray = gray[y:y+h, x:x+w]
-            smiles = smile_cascade.detectMultiScale(roi_gray, scaleFactor=1.7, minNeighbors=22, minSize=(25, 25))
+            # Slight Gaussian blur to reduce noise
+            roi_gray = cv2.GaussianBlur(roi_gray, (3, 3), 0)
+            smiles = smile_cascade.detectMultiScale(roi_gray, scaleFactor=1.5, minNeighbors=15, minSize=(20, 20))
             if len(smiles) > 0:
-                return GestureResult(detected=True, label="smile")
+                # Confidence heuristic: relative width and count of detections
+                confs = []
+                for (sx, sy, sw, sh) in smiles:
+                    rel = min(1.0, (sw / max(1.0, w)) * 1.5)
+                    confs.append(rel)
+                best_conf = max(best_conf, float(min(1.0, sum(confs))))
+        if best_conf > 0.0:
+            return GestureResult(detected=True, label="smile", confidence=best_conf)
         return GestureResult(detected=False)
     except Exception as e:
         return GestureResult(detected=False, error=f"Smile detection failed: {e}")
 
 
 def detect_namaste_from_image(pil_image: Image.Image) -> GestureResult:
-    """Detect a namaste gesture using MediaPipe Hands by checking hands proximity.
+    """Detect hand gestures using MediaPipe Hands with palm-size normalization and confidence.
 
-    Heuristic: If two hands detected with wrists close and palms facing, we flag 'namaste'.
-    This is a simplistic heuristic intended only for MVP demo; may be unreliable.
+    Improvements:
+    - Normalize distances by estimated palm width for scale invariance
+    - Provide a simple confidence score in [0,1]
+    - Refined heuristics for two-hand (namaste/clap/fist_bump/shrug) and single-hand gestures
     """
     if mp is None:
         return GestureResult(detected=False, error="MediaPipe not available")
 
     try:
         mp_hands = mp.solutions.hands
-        with mp_hands.Hands(static_image_mode=True, max_num_hands=2, min_detection_confidence=0.5) as hands:
+        with mp_hands.Hands(
+            static_image_mode=True,
+            max_num_hands=2,
+            model_complexity=1,
+            min_detection_confidence=0.6,
+        ) as hands:
             img = np.array(pil_image.convert("RGB"))
             results = hands.process(img)
             if not results.multi_hand_landmarks:
@@ -333,45 +363,96 @@ def detect_namaste_from_image(pil_image: Image.Image) -> GestureResult:
             def lm_pt(lm):
                 return (lm.x * img_w, lm.y * img_h)
 
+            def euclidean(a, b):
+                return float(((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5)
+
+            def palm_width(lms: list[tuple[float, float]]) -> float:
+                idx = mp_hands.HandLandmark.INDEX_FINGER_MCP
+                pky = mp_hands.HandLandmark.PINKY_MCP
+                return euclidean(lms[idx], lms[pky])
+
+            def tip_to_wrist_ratio(lms: list[tuple[float, float]], tip_idx: int, wrist_idx: int) -> float:
+                pw = max(1.0, palm_width(lms))
+                return euclidean(lms[tip_idx], lms[wrist_idx]) / pw
+
+            def conf_less(value: float, threshold: float) -> float:
+                # Higher confidence when value is much smaller than threshold
+                return float(max(0.0, min(1.0, 1.0 - (value / max(1e-6, threshold)))))
+
+            def conf_greater(value: float, threshold: float) -> float:
+                # Higher confidence when value is much larger than threshold
+                return float(max(0.0, min(1.0, (value / max(1e-6, threshold)) - 1.0)))
+
             # Collect landmark arrays per hand for easier heuristics
-            hands_lms = []
+            hands_lms: list[list[tuple[float, float]]] = []
             for hand_landmarks in results.multi_hand_landmarks:
                 pts = [lm_pt(lm) for lm in hand_landmarks.landmark]
                 hands_lms.append(pts)
 
-            # If two hands, check for namaste, clap, fist_bump, shrug
+            # Two-hand heuristics
             if len(hands_lms) >= 2:
-                # wrist is landmark 0
-                (x1, y1) = hands_lms[0][mp_hands.HandLandmark.WRIST]
-                (x2, y2) = hands_lms[1][mp_hands.HandLandmark.WRIST]
-                dist = ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5
-                # Namaste: wrists close together
-                if dist < max(40, img_w * 0.12):
-                    return GestureResult(detected=True, label="namaste")
+                l0, l1 = hands_lms[0], hands_lms[1]
+                wrist0 = l0[mp_hands.HandLandmark.WRIST]
+                wrist1 = l1[mp_hands.HandLandmark.WRIST]
+                wrist_dist = euclidean(wrist0, wrist1)
+                avg_palm = max(1.0, 0.5 * (palm_width(l0) + palm_width(l1)))
 
-                # Clap heuristic: average distance between corresponding fingertips small
-                tips_idx = [mp_hands.HandLandmark.INDEX_FINGER_TIP, mp_hands.HandLandmark.MIDDLE_FINGER_TIP,
-                            mp_hands.HandLandmark.RING_FINGER_TIP, mp_hands.HandLandmark.PINKY_TIP]
-                tip_dists = []
-                for idx in tips_idx:
-                    p0 = hands_lms[0][idx]
-                    p1 = hands_lms[1][idx]
-                    tip_dists.append(((p0[0] - p1[0]) ** 2 + (p0[1] - p1[1]) ** 2) ** 0.5)
-                if np.mean(tip_dists) < max(20, img_w * 0.06):
-                    return GestureResult(detected=True, label="clap")
+                # Finger-tip pairing distances
+                tips_idx = [
+                    mp_hands.HandLandmark.INDEX_FINGER_TIP,
+                    mp_hands.HandLandmark.MIDDLE_FINGER_TIP,
+                    mp_hands.HandLandmark.RING_FINGER_TIP,
+                    mp_hands.HandLandmark.PINKY_TIP,
+                ]
+                tip_dists = [euclidean(l0[idx], l1[idx]) for idx in tips_idx]
+                mean_tip = float(np.mean(tip_dists)) if tip_dists else 1e6
 
-                # Fist bump: wrists close and fingertips close but not fully palm-touching
-                if dist < max(80, img_w * 0.25) and np.mean(tip_dists) < max(80, img_w * 0.25):
-                    return GestureResult(detected=True, label="fist_bump")
+                # Namaste: wrists close and tips close relative to palm size
+                th_wrist_close = 1.6 * avg_palm
+                th_tips_close = 1.5 * avg_palm
+                if wrist_dist < th_wrist_close and mean_tip < th_tips_close:
+                    c1 = conf_less(wrist_dist, th_wrist_close)
+                    c2 = conf_less(mean_tip, th_tips_close)
+                    return GestureResult(detected=True, label="namaste", confidence=min(c1, c2))
 
-                # Shrug-like: both hands raised near shoulders (y small) and apart
-                avg_y = (y1 + y2) / 2.0
-                if avg_y < img_h * 0.45 and abs(x1 - x2) > img_w * 0.2:
-                    return GestureResult(detected=True, label="shrug")
+                # Clap: tips very close regardless of wrist distance
+                th_tips_clap = 1.2 * avg_palm
+                if mean_tip < th_tips_clap:
+                    return GestureResult(detected=True, label="clap", confidence=conf_less(mean_tip, th_tips_clap))
+
+                # Fist bump: wrists moderately close and fists (tips near wrists on both hands)
+                folded_th = 1.15
+                ratios0 = [
+                    tip_to_wrist_ratio(l0, mp_hands.HandLandmark.THUMB_TIP, mp_hands.HandLandmark.WRIST),
+                    tip_to_wrist_ratio(l0, mp_hands.HandLandmark.INDEX_FINGER_TIP, mp_hands.HandLandmark.WRIST),
+                    tip_to_wrist_ratio(l0, mp_hands.HandLandmark.MIDDLE_FINGER_TIP, mp_hands.HandLandmark.WRIST),
+                    tip_to_wrist_ratio(l0, mp_hands.HandLandmark.RING_FINGER_TIP, mp_hands.HandLandmark.WRIST),
+                    tip_to_wrist_ratio(l0, mp_hands.HandLandmark.PINKY_TIP, mp_hands.HandLandmark.WRIST),
+                ]
+                ratios1 = [
+                    tip_to_wrist_ratio(l1, mp_hands.HandLandmark.THUMB_TIP, mp_hands.HandLandmark.WRIST),
+                    tip_to_wrist_ratio(l1, mp_hands.HandLandmark.INDEX_FINGER_TIP, mp_hands.HandLandmark.WRIST),
+                    tip_to_wrist_ratio(l1, mp_hands.HandLandmark.MIDDLE_FINGER_TIP, mp_hands.HandLandmark.WRIST),
+                    tip_to_wrist_ratio(l1, mp_hands.HandLandmark.RING_FINGER_TIP, mp_hands.HandLandmark.WRIST),
+                    tip_to_wrist_ratio(l1, mp_hands.HandLandmark.PINKY_TIP, mp_hands.HandLandmark.WRIST),
+                ]
+                both_fists = all(r < folded_th for r in ratios0) and all(r < folded_th for r in ratios1)
+                th_wrist_bump = 2.0 * avg_palm
+                if both_fists and wrist_dist < th_wrist_bump:
+                    c1 = conf_less(wrist_dist, th_wrist_bump)
+                    c2 = min([conf_less(r, folded_th) for r in ratios0 + ratios1])
+                    return GestureResult(detected=True, label="fist_bump", confidence=min(c1, c2))
+
+                # Shrug-like: hands raised and apart
+                avg_y = (wrist0[1] + wrist1[1]) / 2.0
+                if avg_y < img_h * 0.45 and abs(wrist0[0] - wrist1[0]) > img_w * 0.2:
+                    # Confidence increases the higher the hands are
+                    conf = conf_less(avg_y, img_h * 0.45)
+                    return GestureResult(detected=True, label="shrug", confidence=conf)
 
                 return GestureResult(detected=False)
 
-            # Single-hand heuristics
+            # Single-hand heuristics (normalize by palm width)
             lms = hands_lms[0]
             wrist = lms[mp_hands.HandLandmark.WRIST]
             thumb_tip = lms[mp_hands.HandLandmark.THUMB_TIP]
@@ -380,44 +461,50 @@ def detect_namaste_from_image(pil_image: Image.Image) -> GestureResult:
             ring_tip = lms[mp_hands.HandLandmark.RING_FINGER_TIP]
             pinky_tip = lms[mp_hands.HandLandmark.PINKY_TIP]
 
-            def dist(a, b):
-                return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+            pw = max(1.0, palm_width(lms))
 
-            # Thresholds relative to image width
-            small_th = img_w * 0.04
-            mid_th = img_w * 0.08
-            large_th = img_w * 0.18
+            # Ratios of tip-to-wrist distances to palm width
+            r_thumb = euclidean(thumb_tip, wrist) / pw
+            r_index = euclidean(index_tip, wrist) / pw
+            r_middle = euclidean(middle_tip, wrist) / pw
+            r_ring = euclidean(ring_tip, wrist) / pw
+            r_pinky = euclidean(pinky_tip, wrist) / pw
+
+            extended_th = 1.7
+            folded_th = 1.2
 
             # OK sign: thumb tip close to index tip
-            if dist(thumb_tip, index_tip) < small_th:
-                return GestureResult(detected=True, label="ok")
+            ok_th = 0.6 * pw
+            d_ok = euclidean(thumb_tip, index_tip)
+            if d_ok < ok_th:
+                return GestureResult(detected=True, label="ok", confidence=conf_less(d_ok, ok_th))
 
             # Peace sign: index and middle extended, ring/pinky folded
-            if dist(index_tip, wrist) > mid_th and dist(middle_tip, wrist) > mid_th and \
-               dist(ring_tip, wrist) < mid_th and dist(pinky_tip, wrist) < mid_th:
-                return GestureResult(detected=True, label="peace")
+            if r_index > extended_th and r_middle > extended_th and r_ring < extended_th and r_pinky < extended_th:
+                c = min(conf_greater(r_index, extended_th), conf_greater(r_middle, extended_th), conf_less(r_ring, extended_th), conf_less(r_pinky, extended_th))
+                return GestureResult(detected=True, label="peace", confidence=c)
 
-            # Thumbs up: thumb extended away from wrist and other fingers folded
-            other_avg = (dist(index_tip, wrist) + dist(middle_tip, wrist) + dist(ring_tip, wrist) + dist(pinky_tip, wrist)) / 4.0
-            if dist(thumb_tip, wrist) > mid_th and other_avg < mid_th:
-                return GestureResult(detected=True, label="thumbs_up")
+            # Thumbs up: thumb extended and other fingers relatively folded
+            others_avg = (r_index + r_middle + r_ring + r_pinky) / 4.0
+            if r_thumb > extended_th and others_avg < extended_th:
+                c = min(conf_greater(r_thumb, extended_th), conf_less(others_avg, extended_th))
+                return GestureResult(detected=True, label="thumbs_up", confidence=c)
 
             # Rock-on: index and pinky extended, middle and ring folded
-            if dist(index_tip, wrist) > mid_th and dist(pinky_tip, wrist) > mid_th and \
-               dist(middle_tip, wrist) < mid_th and dist(ring_tip, wrist) < mid_th:
-                return GestureResult(detected=True, label="rock-on")
+            if r_index > extended_th and r_pinky > extended_th and r_middle < extended_th and r_ring < extended_th:
+                c = min(conf_greater(r_index, extended_th), conf_greater(r_pinky, extended_th), conf_less(r_middle, extended_th), conf_less(r_ring, extended_th))
+                return GestureResult(detected=True, label="rock-on", confidence=c)
 
             # Fist: all fingertips close to wrist
-            if all(dist(t, wrist) < small_th for t in (thumb_tip, index_tip, middle_tip, ring_tip, pinky_tip)):
-                return GestureResult(detected=True, label="fist_bump")
+            if all(r < folded_th for r in (r_thumb, r_index, r_middle, r_ring, r_pinky)):
+                c = min(conf_less(r_thumb, folded_th), conf_less(r_index, folded_th), conf_less(r_middle, folded_th), conf_less(r_ring, folded_th), conf_less(r_pinky, folded_th))
+                return GestureResult(detected=True, label="fist_bump", confidence=c)
 
             # Raised-hand / wave: open palm (all fingers extended)
-            if all(dist(t, wrist) > mid_th for t in (index_tip, middle_tip, ring_tip, pinky_tip)):
-                # If hand is high in the image, call it a raised-hand
+            if all(r > extended_th for r in (r_index, r_middle, r_ring, r_pinky)):
                 if wrist[1] < img_h * 0.35:
-                    return GestureResult(detected=True, label="raised-hand")
-                # Else treat as a generic wave
-                return GestureResult(detected=True, label="wave")
+                    return GestureResult(detected=True, label="raised-hand", confidence=conf_less(wrist[1], img_h * 0.35))
+                return GestureResult(detected=True, label="wave", confidence=0.5)
 
             return GestureResult(detected=False)
     except Exception as e:
