@@ -4,12 +4,12 @@ A laptop-friendly Streamlit app that combines:
 - Text translation (English ↔ Hindi via LibreTranslate demo API)
 - Script transliteration (Devanagari ↔ Latin/IAST)
 - Text emotion detection (happy/sad/neutral) using a Hugging Face pipeline
-- Basic gesture recognition from local assets images (smile via OpenCV Haar cascades, namaste via MediaPipe Hands heuristic), with button fallbacks
+- Basic gesture recognition from webcam snapshot (smile via OpenCV Haar cascades, namaste via MediaPipe Hands heuristic), with button fallbacks
 
 ### Requirements
 - Python 3.10+
 - Internet access for first-time model download and LibreTranslate API
-- Webcam not required (uses assets images)
+- Webcam optional (app still works without it)
 
 ### Setup
 ```bash
@@ -31,7 +31,7 @@ This opens the app in your browser. If it doesn’t auto-open, visit the printed
 - Mode: choose Translate or Transliterate in the sidebar.
 - Translate: choose source and target languages (English/Hindi), enter text, click Run.
 - Transliterate: choose From Script and To Script (Devanagari/Latin-IAST), enter text, click Run.
-- Gesture input: select an image from the `assets/` folder (e.g., `smile.jpg`, `namaste.jpg`) or click the Smile/Namaste buttons to simulate.
+- Gesture input: take a webcam snapshot (smile/namaste) or click the Smile/Namaste buttons to simulate.
 - Output: shows final text tagged with detected emotion and gesture (e.g., `[happy 😊] [smile 😄]`).
 
 ### Example inputs
@@ -42,6 +42,9 @@ This opens the app in your browser. If it doesn’t auto-open, visit the printed
 Note: Translations may vary depending on the public API response.
 
 ### Troubleshooting
+- Camera not working:
+  - Ensure your browser has camera permissions enabled.
+  - Some environments (VMs/remote servers) do not expose a webcam; use the gesture buttons instead.
 - Gesture detection errors:
   - OpenCV/MediaPipe may not be available on all systems. The app will show friendly messages and you can still use buttons.
 - Emotion model download fails:
@@ -50,8 +53,9 @@ Note: Translations may vary depending on the public API response.
 - LibreTranslate failures or rate limits:
   - The app will preserve your input text and display an info message. Try again later or switch to Transliterate mode.
 
-### Demo images
-- The `assets/` folder is used for gesture detection. Add example images such as `assets/smile.jpg` and `assets/namaste.jpg`.
+### Demo images (optional)
+- The `assets/` folder is provided for manual testing if webcam is unavailable.
+- Add two images as examples: `assets/smile.jpg` and `assets/namaste.jpg`.
 - Then you can run the included smoke test (below) to exercise gesture functions.
 
 ### Quick smoke test (pre-flight)
