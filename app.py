@@ -64,6 +64,13 @@ SCRIPT_OPTIONS = {"Devanagari": "DEVANAGARI", "Latin (IAST)": "IAST"}
 EMOJI_BY_EMOTION = {"happy": "😄", "sad": "😢", "neutral": "😐"}
 EMOJI_BY_GESTURE = {"smile": "😊", "namaste": "🙏"}
 
+# Public LibreTranslate endpoints to try (best-effort, may change/rate-limit)
+LIBRETRANSLATE_ENDPOINTS = (
+    "https://libretranslate.com/translate",
+    "https://libretranslate.de/translate",
+    "https://translate.argosopentech.com/translate",
+)
+
 
 # ---------------------------
 # Helper data structures
@@ -144,25 +151,35 @@ def translate_text(text: str, source_lang_code: str, target_lang_code: str) -> T
     else:
         warning = "Primary translator not installed. Trying fallback..."
 
-    # Attempt 2: LibreTranslate public instance (best-effort, may be rate-limited)
-    try:
-        resp = requests.post(
-            "https://libretranslate.de/translate",
-            data={
-                "q": text,
-                "source": source_lang_code,
-                "target": target_lang_code,
-                "format": "text",
-            },
-            timeout=10,
-        )
-        if resp.ok:
+    # Attempt 2: LibreTranslate public endpoints (best-effort, may be rate-limited or HTML)
+    for endpoint in LIBRETRANSLATE_ENDPOINTS:
+        try:
+            resp = requests.post(
+                endpoint,
+                data={
+                    "q": text,
+                    "source": source_lang_code,
+                    "target": target_lang_code,
+                    "format": "text",
+                },
+                timeout=10,
+            )
+            if not resp.ok:
+                continue
+            # Guard against non-JSON responses (e.g., HTML error pages)
+            content_type = resp.headers.get("Content-Type", "")
+            if "json" not in content_type.lower():
+                continue
             data = resp.json()
             translated = data.get("translatedText")
             if isinstance(translated, str) and translated.strip():
                 return translated, warning
-    except Exception as e:
-        warning = f"Translation fallback failed ({type(e).__name__}). Showing original text."
+        except Exception:
+            # Try next endpoint
+            continue
+
+    # If we reach here, all fallbacks failed
+    warning = warning or "Translation service unreachable right now; showing original text."
 
     # Give up gracefully
     return text, warning or "Translation unavailable; showing original text."
