@@ -12,7 +12,7 @@ Setup & Run (no GPU required):
 Notes:
 - Translation uses LibreTranslate (public demo URL by default) with graceful fallback.
 - Emotion detection uses a small Hugging Face pipeline and runs on CPU.
-- Gesture recognition uses images from the local assets folder (no webcam). Quick buttons are also provided.
+- Gesture recognition attempts webcam via Streamlit's camera_input; if unavailable, use buttons.
 - For a demo-friendly build, OpenCV/MediaPipe are optional; errors are handled with friendly messages.
 
 """
@@ -24,8 +24,6 @@ import time
 import base64
 import typing as t
 from dataclasses import dataclass
-import os
-from pathlib import Path
 
 import requests
 import numpy as np
@@ -546,7 +544,7 @@ def main():
     with st.expander("About this demo"):
         st.write(
             "This MVP demonstrates text translation/transliteration with simple emotion detection and basic gesture recognition. "
-            "If optional models are unavailable, the app degrades gracefully."
+            "If camera or models are unavailable, the app degrades gracefully."
         )
 
     # Sidebar controls
@@ -572,55 +570,30 @@ def main():
     # Text input
     input_text = st.text_area("Input Text", height=150, placeholder="Type text here…")
 
-    # Gesture input: select image from assets or use quick buttons
+    # Gesture input: webcam snapshot or buttons
     st.subheader("Gesture Input (optional)")
-    src_col, btn_col = st.columns(2)
-
-    selected_asset_image: t.Optional[Image.Image] = None
-    gesture_errors: list[str] = []
-
-    with src_col:
-        assets_dir = Path(__file__).parent / "assets"
-        allowed_exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
-        image_files = []
-        try:
-            if assets_dir.exists() and assets_dir.is_dir():
-                image_files = [p for p in assets_dir.iterdir() if p.suffix.lower() in allowed_exts]
-            else:
-                st.info("Create an 'assets' folder next to this script and add gesture images (e.g., smile.jpg, namaste.jpg).")
-        except Exception as e:
-            gesture_errors.append(f"Failed to read assets folder: {e}")
-
-        if image_files:
-            options = [p.name for p in sorted(image_files)]
-            chosen = st.selectbox("Choose an image from assets", options=options, index=0)
-            chosen_path = next((p for p in image_files if p.name == chosen), None)
-            if chosen_path is not None:
-                try:
-                    selected_asset_image = Image.open(chosen_path)
-                    st.image(selected_asset_image, caption=chosen, use_container_width=True)
-                except Exception as e:
-                    gesture_errors.append(f"Failed to open image '{chosen}': {e}")
-        else:
-            st.info("No images found in assets/. Add 'smile.jpg' and/or 'namaste.jpg'.")
-
+    cam_col, btn_col = st.columns(2)
+    with cam_col:
+        snapshot = st.camera_input("Take a snapshot (smile/namaste)", help="If your device has a webcam, try detecting a smile or a namaste gesture.")
     with btn_col:
-        st.write("Or use quick gesture buttons:")
+        st.write("No camera? Use quick gesture buttons:")
         btn_smile = st.button("Trigger Smile 😄")
         btn_namaste = st.button("Trigger Namaste 🙏")
 
     # Process gestures
     gesture_result = GestureResult(detected=False)
+    gesture_errors: list[str] = []
 
-    if selected_asset_image is not None:
+    if snapshot is not None:
         try:
+            pil_img = Image.open(io.BytesIO(snapshot.getvalue()))
             # Try smile detection first
-            smile_res = detect_smile_from_image(selected_asset_image)
+            smile_res = detect_smile_from_image(pil_img)
             if smile_res.detected:
                 gesture_result = smile_res
             else:
                 # Try namaste detection
-                namaste_res = detect_namaste_from_image(selected_asset_image)
+                namaste_res = detect_namaste_from_image(pil_img)
                 if namaste_res.detected:
                     gesture_result = namaste_res
                 # track any errors for display
@@ -629,7 +602,7 @@ def main():
                 if namaste_res.error:
                     gesture_errors.append(namaste_res.error)
         except Exception as e:
-            gesture_errors.append(f"Failed to read selected image: {e}")
+            gesture_errors.append(f"Failed to read snapshot: {e}")
 
     # Button fallback gestures
     if btn_smile:
