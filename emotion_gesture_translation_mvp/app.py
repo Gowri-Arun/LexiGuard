@@ -61,7 +61,12 @@ except Exception:  # pragma: no cover
 SUPPORTED_LANGS = {
     "en": "English",
     "hi": "Hindi",
-}
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "ja": "Japanese",
+    "ru": "Russian",
+    "pt": "Portuguese",}
 
 EMOTION_TO_EMOJI = {
     "joy": "😊",
@@ -72,14 +77,25 @@ EMOTION_TO_EMOJI = {
     "surprise": "😮",
     "love": "😍",
     "neutral": "😐",
+    "confused": "😕",
+    "embarrassed": "😳",
 }
 
 GESTURE_TO_EMOJI = {
     "smile": "😄",
     "namaste": "🙏",
+    "wave": "👋",
+    "thumbs_up": "👍",
+    "clap": "👏",
+    "fist_bump": "👊",
+    "peace": "✌️",
+    "raised-hand": "✋",
+    "ok": "👌",
+    "rock-on": "🤘",
+    "shrug": "🤷",
 }
 
-DEFAULT_LT_ENDPOINT = "https://libretranslate.de/translate"
+DEFAULT_LT_ENDPOINT = "http://127.0.0.1:5000/translate"  # Change if using a different LibreTranslate server
 
 
 @dataclass
@@ -225,22 +241,39 @@ def analyze_emotion(text: str) -> EmotionResult:
             best = max(outputs, key=lambda x: x.get("score", 0.0))
         else:
             return EmotionResult(label="neutral", score=1.0, error="Unexpected emotion output format")
-
         raw_label = str(best.get("label", "neutral")).lower()
         score = float(best.get("score", 0.0))
 
-        # Normalize to {happy, sad, neutral}
-        if any(k in raw_label for k in ["joy", "happiness", "love"]):
+        # More granular normalization to the supported emotion set:
+        # {joy, happy, sad, anger, fear, surprise, love, neutral, confused, embarrassed}
+        if raw_label in ("joy", "joyful") or "joy" in raw_label:
+            norm = "joy"
+        elif raw_label in ("happy", "happiness") or "happy" in raw_label or "happiness" in raw_label:
             norm = "happy"
-        elif any(k in raw_label for k in ["sad", "sorrow"]):
+        elif any(k in raw_label for k in ("sad", "sorrow", "sadness")):
             norm = "sad"
-        elif any(k in raw_label for k in ["anger", "fear", "disgust"]):
-            # Map negative emotions to sad for simplicity
-            norm = "sad"
-        elif "neutral" in raw_label:
+        elif any(k in raw_label for k in ("anger", "angry")):
+            norm = "anger"
+        elif any(k in raw_label for k in ("fear", "afraid", "scared")):
+            norm = "fear"
+        elif any(k in raw_label for k in ("surprise", "surprised")):
+            norm = "surprise"
+        elif "love" in raw_label or "affection" in raw_label:
+            norm = "love"
+        elif any(k in raw_label for k in ("confus", "confused", "confusion")):
+            norm = "confused"
+        elif any(k in raw_label for k in ("embarrass", "embarrassed")):
+            norm = "embarrassed"
+        elif "neutral" in raw_label or raw_label.strip() == "":
             norm = "neutral"
         else:
-            norm = "neutral"
+            # As a best-effort fallback, if the raw label exactly matches one of our keys, keep it.
+            candidate = raw_label.strip()
+            if candidate in EMOTION_TO_EMOJI:
+                norm = candidate
+            else:
+                # Unknown labels are treated as neutral to avoid surprising UI tags
+                norm = "neutral"
 
         return EmotionResult(label=norm, score=score)
     except Exception as e:
@@ -291,25 +324,104 @@ def detect_namaste_from_image(pil_image: Image.Image) -> GestureResult:
         with mp_hands.Hands(static_image_mode=True, max_num_hands=2, min_detection_confidence=0.5) as hands:
             img = np.array(pil_image.convert("RGB"))
             results = hands.process(img)
-            if not results.multi_hand_landmarks or len(results.multi_hand_landmarks) < 2:
+            if not results.multi_hand_landmarks:
                 return GestureResult(detected=False)
 
-            # Extract wrist landmarks for two hands
-            wrist_points = []
             img_h, img_w, _ = img.shape
-            for hand_landmarks in results.multi_hand_landmarks:
-                wrist = hand_landmarks.landmark[mp_hands.HandLandmark.WRIST]
-                wrist_points.append((wrist.x * img_w, wrist.y * img_h))
 
-            if len(wrist_points) >= 2:
-                (x1, y1), (x2, y2) = wrist_points[:2]
+            # Helper: convert landmark to pixel coordinate
+            def lm_pt(lm):
+                return (lm.x * img_w, lm.y * img_h)
+
+            # Collect landmark arrays per hand for easier heuristics
+            hands_lms = []
+            for hand_landmarks in results.multi_hand_landmarks:
+                pts = [lm_pt(lm) for lm in hand_landmarks.landmark]
+                hands_lms.append(pts)
+
+            # If two hands, check for namaste, clap, fist_bump, shrug
+            if len(hands_lms) >= 2:
+                # wrist is landmark 0
+                (x1, y1) = hands_lms[0][mp_hands.HandLandmark.WRIST]
+                (x2, y2) = hands_lms[1][mp_hands.HandLandmark.WRIST]
                 dist = ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5
-                # Heuristic threshold relative to image width
+                # Namaste: wrists close together
                 if dist < max(40, img_w * 0.12):
                     return GestureResult(detected=True, label="namaste")
+
+                # Clap heuristic: average distance between corresponding fingertips small
+                tips_idx = [mp_hands.HandLandmark.INDEX_FINGER_TIP, mp_hands.HandLandmark.MIDDLE_FINGER_TIP,
+                            mp_hands.HandLandmark.RING_FINGER_TIP, mp_hands.HandLandmark.PINKY_TIP]
+                tip_dists = []
+                for idx in tips_idx:
+                    p0 = hands_lms[0][idx]
+                    p1 = hands_lms[1][idx]
+                    tip_dists.append(((p0[0] - p1[0]) ** 2 + (p0[1] - p1[1]) ** 2) ** 0.5)
+                if np.mean(tip_dists) < max(20, img_w * 0.06):
+                    return GestureResult(detected=True, label="clap")
+
+                # Fist bump: wrists close and fingertips close but not fully palm-touching
+                if dist < max(80, img_w * 0.25) and np.mean(tip_dists) < max(80, img_w * 0.25):
+                    return GestureResult(detected=True, label="fist_bump")
+
+                # Shrug-like: both hands raised near shoulders (y small) and apart
+                avg_y = (y1 + y2) / 2.0
+                if avg_y < img_h * 0.45 and abs(x1 - x2) > img_w * 0.2:
+                    return GestureResult(detected=True, label="shrug")
+
+                return GestureResult(detected=False)
+
+            # Single-hand heuristics
+            lms = hands_lms[0]
+            wrist = lms[mp_hands.HandLandmark.WRIST]
+            thumb_tip = lms[mp_hands.HandLandmark.THUMB_TIP]
+            index_tip = lms[mp_hands.HandLandmark.INDEX_FINGER_TIP]
+            middle_tip = lms[mp_hands.HandLandmark.MIDDLE_FINGER_TIP]
+            ring_tip = lms[mp_hands.HandLandmark.RING_FINGER_TIP]
+            pinky_tip = lms[mp_hands.HandLandmark.PINKY_TIP]
+
+            def dist(a, b):
+                return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+
+            # Thresholds relative to image width
+            small_th = img_w * 0.04
+            mid_th = img_w * 0.08
+            large_th = img_w * 0.18
+
+            # OK sign: thumb tip close to index tip
+            if dist(thumb_tip, index_tip) < small_th:
+                return GestureResult(detected=True, label="ok")
+
+            # Peace sign: index and middle extended, ring/pinky folded
+            if dist(index_tip, wrist) > mid_th and dist(middle_tip, wrist) > mid_th and \
+               dist(ring_tip, wrist) < mid_th and dist(pinky_tip, wrist) < mid_th:
+                return GestureResult(detected=True, label="peace")
+
+            # Thumbs up: thumb extended away from wrist and other fingers folded
+            other_avg = (dist(index_tip, wrist) + dist(middle_tip, wrist) + dist(ring_tip, wrist) + dist(pinky_tip, wrist)) / 4.0
+            if dist(thumb_tip, wrist) > mid_th and other_avg < mid_th:
+                return GestureResult(detected=True, label="thumbs_up")
+
+            # Rock-on: index and pinky extended, middle and ring folded
+            if dist(index_tip, wrist) > mid_th and dist(pinky_tip, wrist) > mid_th and \
+               dist(middle_tip, wrist) < mid_th and dist(ring_tip, wrist) < mid_th:
+                return GestureResult(detected=True, label="rock-on")
+
+            # Fist: all fingertips close to wrist
+            if all(dist(t, wrist) < small_th for t in (thumb_tip, index_tip, middle_tip, ring_tip, pinky_tip)):
+                return GestureResult(detected=True, label="fist_bump")
+
+            # Raised-hand / wave: open palm (all fingers extended)
+            if all(dist(t, wrist) > mid_th for t in (index_tip, middle_tip, ring_tip, pinky_tip)):
+                # If hand is high in the image, call it a raised-hand
+                if wrist[1] < img_h * 0.35:
+                    return GestureResult(detected=True, label="raised-hand")
+                # Else treat as a generic wave
+                return GestureResult(detected=True, label="wave")
+
             return GestureResult(detected=False)
     except Exception as e:
-        return GestureResult(detected=False, error=f"Namaste detection failed: {e}")
+        return GestureResult(detected=False, error=f"Namaste/hand gesture detection failed: {e}")
 
 
 # -----------------------------
