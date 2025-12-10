@@ -39,8 +39,6 @@ This opens the app in your browser. If it doesn’t auto-open, visit the printed
 - Hindi → English: "आज मौसम सुहावना है" → Expected like: "The weather is pleasant today." → Tags depend on emotion.
 - Transliteration (Devanagari → Latin): "नमस्ते भारत" → "namaste bhārata"
 
-Note: Translations may vary depending on the public API response.
-
 ### Troubleshooting
 - Camera not working:
   - Ensure your browser has camera permissions enabled.
@@ -53,19 +51,14 @@ Note: Translations may vary depending on the public API response.
 - LibreTranslate failures or rate limits:
   - The app will preserve your input text and display an info message. Try again later or switch to Transliterate mode.
 
-### Demo images (optional)
-- The `assets/` folder is provided for manual testing if webcam is unavailable.
-- Add two images as examples: `assets/smile.jpg` and `assets/namaste.jpg`.
-- Then you can run the included smoke test (below) to exercise gesture functions.
-
-### Quick smoke test (pre-flight)
+### Quick smoke test 
 ```bash
 # From inside emotion_gesture_translation_mvp venv
 python smoke_test.py
 ```
 This script checks translation (with graceful fallback), transliteration, emotion analysis, and (optionally) gesture detection using images in `assets/` if present.
 
-### Suggested module structure (optional refactor)
+### Suggested module structure 
 For maintainability beyond the MVP, split into modules:
 - `core/translation.py`: LibreTranslate client utilities
 - `core/transliteration.py`: Devanagari ↔ Latin helpers
@@ -74,7 +67,3 @@ For maintainability beyond the MVP, split into modules:
 - `ui/app.py`: Streamlit layout and event wiring
 - `tests/`: smoke and unit tests
 
-Update imports in `ui/app.py` accordingly (e.g., `from core.translation import translate_text`).
-
-### License
-This is an MVP demo—adapt as needed for your project.
